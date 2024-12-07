@@ -76,6 +76,8 @@ sistema.calcular_fluxo()
 # Acessa resultados
 print(f"Convergência em {sistema.convergencia} iterações")
 sistema.imprimir_estado()
+sistema.imprimir_transito()
+sistema.imprimir_perdas()
 ```
 
 ### Teste de Estresse para avaliação de desempenho
