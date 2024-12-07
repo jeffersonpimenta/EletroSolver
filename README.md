@@ -78,7 +78,7 @@ print(f"Convergência em {sistema.convergencia} iterações")
 sistema.imprimir_estado()
 ```
 
-### Teste de Estresse de Sistema em Larga Escala
+### Teste de Estresse para avaliação de desempenho
 A biblioteca suporta geração e análise de sistemas de energia com n barras, possibilitando avaliação abrangente de desempenho do algoritmo.
 
 ```python
