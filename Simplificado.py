@@ -39,7 +39,10 @@ print(f"Trânsito de 3 para 4: {magnitude:.4f} /_ {angulo:.4f} pu")
 
 # Calculando perdas de potência
 perdas_12 = sistema.losses(1, 2)
-print(f"Perdas de potência entre Barra 1 e Barra 2: {perdas_12["S_loss"]:.4f}")
+print(f"Perdas ativas de potência entre Barra 1 e Barra 2: {perdas_12["P_loss"]:.4f}")
+
+print(f"Perdas ativas totais do sistema: {sistema.totlosses()["P_loss"]:.4f} pu")
+print(f"Perdas reativas totais do sistema: {sistema.totlosses()["Q_loss"]:.4f} pu")
 
 print(f"Convergência em {sistema.convergencia} iterações com tempo de {sistema.tempo*1000:.4f} ms")
 print(f"Tensão na Barra 3: {sistema.v(3)} pu")

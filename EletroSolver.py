@@ -167,12 +167,28 @@ class SistemaPotencia:
         transito_ji = self.transito(para, de)
 
         # Perdas de potência ativa e reativa
-        S_loss = transito_ij["S_ij"] + transito_ji["S_ij"]  # Potência complexa
-        P_loss = transito_ij["P_ij"] + transito_ji["P_ij"]  # Potência ativa
-        Q_loss = transito_ij["Q_ij"] + transito_ji["Q_ij"]  # Potência reativa
+        S_loss = abs(transito_ij["S_ij"] + transito_ji["S_ij"])  # Potência complexa
+        P_loss = abs(transito_ij["P_ij"] + transito_ji["P_ij"])  # Potência ativa
+        Q_loss = abs(transito_ij["Q_ij"] + transito_ji["Q_ij"])  # Potência reativa
 
         return {"S_loss": S_loss, "P_loss": P_loss, "Q_loss": Q_loss}
 
+    def totlosses(self):
+        """Calcula as perdas totais de potência ativa e reativa em todas as linhas do sistema."""
+        total_P_loss = 0.0  # Inicializa a soma das perdas de potência ativa
+        total_Q_loss = 0.0  # Inicializa a soma das perdas de potência reativa
+
+        # Itera sobre todas as combinações de barras conectadas
+        for i in range(self.n_barras):
+            for j in range(i + 1, self.n_barras):  # Considera apenas pares únicos (i, j)
+                if self.Y[i, j] != 0:  # Verifica se há uma conexão entre as barras
+                    perdas = self.losses(i + 1, j + 1)  # Calcula as perdas entre as barras
+                    total_P_loss += perdas["P_loss"]  # Soma as perdas de potência ativa
+                    total_Q_loss += perdas["Q_loss"]  # Soma as perdas de potência reativa
+
+        # retorna as perdas totais
+        return {"P_loss":total_P_loss,"Q_loss":total_Q_loss}
+    
     def imprimir_estado(self,cd=4):
         print("Estado do Sistema:")
         print("-" * 40)   

@@ -1,7 +1,7 @@
 from EletroSolver import Barra, SistemaPotencia
 import numpy as np
 
-n_barras = 200
+n_barras = 1000
 
 # Gera as barras com diferentes tipos
 barras = [
