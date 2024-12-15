@@ -1,5 +1,6 @@
 import numpy as np
 import time
+import json
 
 class Barra:
     def __init__(self, indice, tipo, V, theta, P, Q):
@@ -33,7 +34,21 @@ class SistemaPotencia:
         V = np.array([barra.V for barra in self.barras])
         theta = np.array([barra.theta for barra in self.barras])
         return V, theta
-
+        
+    def alterar_barra(self, indice, tipo=None, V=None, theta=None, P=None, Q=None):
+        """Altera as propriedades de uma barra."""
+        barra = self.barras[indice - 1]
+        if tipo is not None:
+            barra.tipo = tipo
+        if V is not None:
+            barra.V = V
+        if theta is not None:
+            barra.theta = theta
+        if P is not None:
+            barra.P = P
+        if Q is not None:
+            barra.Q = Q
+        
     def calcular_fluxo(self):
         """Resolve o fluxo de potência usando o método de Newton-Raphson."""
         start_time = time.time()  # Marca o tempo inicial
@@ -47,6 +62,7 @@ class SistemaPotencia:
             if np.linalg.norm(dX) < self.tolerancia:
                 self.convergencia = k + 1
                 #print(f"Convergência atingida em {k + 1} iterações.")
+                self.ultimajacobiana = J
                 break
 
             J = self.calcular_jacobiano(V, theta, P_calc, Q_calc)
@@ -188,6 +204,70 @@ class SistemaPotencia:
 
         # retorna as perdas totais
         return {"P_loss":total_P_loss,"Q_loss":total_Q_loss}
+    
+    def calcular_sensibilidade(self):
+        """Calcula as sensibilidades de potência ativa e reativa com base na matriz Jacobiana."""
+        if hasattr(self, 'ultimajacobiana'):
+            return np.linalg.inv(self.ultimajacobiana)  # Retorna a matriz de sensibilidade
+        else:
+            raise ValueError("A Jacobiana ainda não foi calculada.")    
+
+    def exportar(self, arquivo="sistema.json"):
+        """Exporta todas as informações do sistema para um arquivo JSON."""
+        def serializar_valor(valor):
+            """Converte valores complexos em um formato serializável."""
+            if isinstance(valor, complex):
+                return {"real": valor.real, "imag": valor.imag}
+            if isinstance(valor, np.ndarray):  # Converte arrays para listas
+                return valor.tolist()
+            return valor
+
+        dados = {
+            "barras": [
+                {
+                    "indice": barra.indice + 1,
+                    "tipo": barra.tipo,
+                    "tensao": barra.V,
+                    "angulo": barra.theta,
+                    "potencia_ativa": barra.P,
+                    "potencia_reativa": barra.Q
+                }
+                for barra in self.barras
+            ],
+            "fluxos": [
+                {
+                    "linha": f"{i + 1} -> {j + 1}",
+                    **{chave: serializar_valor(valor) for chave, valor in self.transito(i + 1, j + 1).items()}
+                }
+                for i in range(self.n_barras)
+                for j in range(i + 1, self.n_barras)
+                if self.Y[i, j] != 0
+            ] + [
+                {
+                    "linha": f"{j + 1} -> {i + 1}",
+                    **{chave: serializar_valor(valor) for chave, valor in self.transito(j + 1, i + 1).items()}
+                }
+                for i in range(self.n_barras)
+                for j in range(i + 1, self.n_barras)
+                if self.Y[j, i] != 0
+            ],
+            "perdas": self.totlosses(),
+            "parametros": {
+                "tolerancia": self.tolerancia,
+                "max_iteracoes": self.max_iter,
+                "sbase": self.sbase,
+                "tempo_solucao": getattr(self, 'tempo', None)
+            },
+            "matriz_admitancia": [
+                [serializar_valor(self.Y[i, j]) for j in range(self.n_barras)] 
+                for i in range(self.n_barras)
+            ]
+        }
+
+        with open(arquivo, 'w') as f:
+            json.dump(dados, f, indent=4)
+        print(f"Informações exportadas para {arquivo}.")
+
     
     def imprimir_estado(self,cd=4):
         print("Estado do Sistema:")

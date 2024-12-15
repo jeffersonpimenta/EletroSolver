@@ -50,3 +50,5 @@ print(f"Ângulo na Barra 3: {sistema.theta(3)} rad")
 sistema.imprimir_estado()
 sistema.imprimir_transito()
 sistema.imprimir_perdas()
+
+sistema.exportar()
