@@ -136,8 +136,9 @@ pytest
 ```
 
 A suíte cobre o Jacobiano (analítico vs. diferenças finitas), invariantes físicos
-(mismatch nulo e balanço de potência), validação de entrada e detecção de
-(não-)convergência.
+(mismatch nulo e balanço de potência), validação de entrada, detecção de
+(não-)convergência e os casos IEEE padrão (WSCC 9 barras e IEEE 14 barras,
+dados MATPOWER) — com a solução do IEEE 14 conferida contra a referência publicada.
 ## Licença
 GNU GENERAL PUBLIC LICENSE
 
