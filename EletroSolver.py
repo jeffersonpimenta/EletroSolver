@@ -1,302 +1,405 @@
-import numpy as np
-import time
 import json
+import time
+import warnings
+
+import numpy as np
+
+# Modulo minimo de Y[i, j] para considerar duas barras conectadas.
+# Evita comparacoes de igualdade exata com complexos (sujeitas a erro de ponto flutuante).
+TOL_CONEXAO = 1e-12
+
 
 class Barra:
-    def __init__(self, indice, tipo, V, theta, P, Q):
-        self.indice = indice  # Índice da barra
-        self.tipo = tipo      # Tipo de barra: 1 = PQ, 2 = PV, 3 = Slack
-        self.V = V            # Tensão na barra
-        self.theta = theta    # Ângulo de fase
-        self.P = P            # Potência ativa injetada
-        self.Q = Q            # Potência reativa injetada
+    """Barra (no) do sistema eletrico.
+
+    tipo: 1 = PQ, 2 = PV, 3 = Slack (referencia).
+    V em pu, theta em radianos, P/Q injetados em pu (ou na base usada).
+    """
+
+    def __init__(self, indice: int, tipo: int, V: float, theta: float,
+                 P: float, Q: float) -> None:
+        if tipo not in (1, 2, 3):
+            raise ValueError(
+                f"tipo de barra invalido: {tipo!r} (esperado 1=PQ, 2=PV, 3=Slack)"
+            )
+        if V <= 0:
+            raise ValueError(f"tensao V deve ser > 0 (recebido {V!r})")
+        self.indice = indice  # Indice da barra (0-based)
+        self.tipo = tipo      # 1 = PQ, 2 = PV, 3 = Slack
+        self.V = float(V)     # Tensao na barra (pu)
+        self.theta = float(theta)  # Angulo de fase (rad)
+        self.P = float(P)     # Potencia ativa injetada
+        self.Q = float(Q)     # Potencia reativa injetada
+
 
 class SistemaPotencia:
-    def __init__(self, barras, Y, tolerancia=1e-6, max_iter=100, Sbase=100):
+    """Resolve o fluxo de potencia por Newton-Raphson.
+
+    Requisito de ordenacao: a barra slack (tipo 3) deve ser a barra de indice 0
+    (a primeira da lista). O construtor valida isso. Generalizar a slack para uma
+    posicao arbitraria exigiria reindexar as submatrizes do Jacobiano e e trabalho
+    futuro.
+
+    Apos calcular_fluxo():
+      - self.convergiu  -> bool indicando se o metodo convergiu.
+      - self.convergencia -> numero de iteracoes ate convergir (None se nao convergiu).
+    """
+
+    def __init__(self, barras, Y, tolerancia: float = 1e-6,
+                 max_iter: int = 100, Sbase: float = 100) -> None:
+        n = len(barras)
+        Y = np.asarray(Y)
+        if Y.shape != (n, n):
+            raise ValueError(f"matriz Y deve ser {n}x{n}, recebida {Y.shape}")
+        if tolerancia <= 0:
+            raise ValueError("tolerancia deve ser > 0")
+        if max_iter < 1:
+            raise ValueError("max_iter deve ser >= 1")
+        if Sbase <= 0:
+            raise ValueError("Sbase deve ser > 0")
+        slacks = [i for i, b in enumerate(barras) if b.tipo == 3]
+        if len(slacks) != 1:
+            raise ValueError(
+                f"sistema deve ter exatamente uma barra slack (tipo 3); "
+                f"encontradas {len(slacks)}"
+            )
+        if slacks[0] != 0:
+            raise ValueError(
+                "a barra slack (tipo 3) deve ser a barra de indice 0 (primeira da lista)"
+            )
+
         self.barras = barras  # Lista de objetos Barra
-        self.Y = Y            # Matriz de admitâncias
-        self.n_barras = len(barras)
+        self.Y = Y            # Matriz de admitancias
+        self.n_barras = n
         self.tolerancia = tolerancia
         self.max_iter = max_iter
         self.sbase = Sbase
         self.convergencia = None
+        self.convergiu = False
 
-    def v(self, indice):
-        """Retorna a tensão em pu da barra `indice`."""
+    def _validar_indice_1based(self, indice: int) -> None:
+        if not (1 <= indice <= self.n_barras):
+            raise ValueError(
+                f"indice {indice} fora da faixa [1, {self.n_barras}]"
+            )
+
+    def v(self, indice: int) -> float:
+        """Retorna a tensao em pu da barra `indice` (1-based)."""
+        self._validar_indice_1based(indice)
         return self.barras[indice - 1].V
 
-    def theta(self, indice):
-        """Retorna o ângulo em radianos da barra `indice`."""
+    def theta(self, indice: int) -> float:
+        """Retorna o angulo em radianos da barra `indice` (1-based)."""
+        self._validar_indice_1based(indice)
         return self.barras[indice - 1].theta
 
     def inicializar_estado(self):
-        """Inicializa os vetores de tensões e ângulos."""
-        V = np.array([barra.V for barra in self.barras])
-        theta = np.array([barra.theta for barra in self.barras])
+        """Inicializa os vetores de tensoes e angulos."""
+        V = np.array([barra.V for barra in self.barras], dtype=float)
+        theta = np.array([barra.theta for barra in self.barras], dtype=float)
         return V, theta
-        
-    def alterar_barra(self, indice, tipo=None, V=None, theta=None, P=None, Q=None):
-        """Altera as propriedades de uma barra."""
+
+    def alterar_barra(self, indice: int, tipo=None, V=None, theta=None,
+                      P=None, Q=None) -> None:
+        """Altera as propriedades de uma barra (`indice` 1-based)."""
+        self._validar_indice_1based(indice)
         barra = self.barras[indice - 1]
         if tipo is not None:
+            if tipo not in (1, 2, 3):
+                raise ValueError(f"tipo de barra invalido: {tipo!r}")
             barra.tipo = tipo
         if V is not None:
-            barra.V = V
+            if V <= 0:
+                raise ValueError(f"tensao V deve ser > 0 (recebido {V!r})")
+            barra.V = float(V)
         if theta is not None:
-            barra.theta = theta
+            barra.theta = float(theta)
         if P is not None:
-            barra.P = P
+            barra.P = float(P)
         if Q is not None:
-            barra.Q = Q
-        
-    def calcular_fluxo(self):
-        """Resolve o fluxo de potência usando o método de Newton-Raphson."""
-        start_time = time.time()  # Marca o tempo inicial
+            barra.Q = float(Q)
+
+    def calcular_fluxo(self) -> None:
+        """Resolve o fluxo de potencia usando o metodo de Newton-Raphson."""
+        start_time = time.time()
         V, theta = self.inicializar_estado()
 
+        self.convergiu = False
+        self.convergencia = None
         for k in range(self.max_iter):
             P_calc, Q_calc = self.fluxo_potencia(V, theta)
             dP, dQ = self.calcular_desvios(P_calc, Q_calc)
             dX = np.concatenate([dP, dQ])
 
+            # Jacobiano no ponto atual (necessario tambem para a sensibilidade).
+            J = self.calcular_jacobiano(V, theta, P_calc, Q_calc)
+            self.ultimajacobiana = J
+
             if np.linalg.norm(dX) < self.tolerancia:
                 self.convergencia = k + 1
-                #print(f"Convergência atingida em {k + 1} iterações.")
-                self.ultimajacobiana = J
+                self.convergiu = True
                 break
 
-            J = self.calcular_jacobiano(V, theta, P_calc, Q_calc)
-            delta_X = np.linalg.solve(J, dX)
+            try:
+                delta_X = np.linalg.solve(J, dX)
+            except np.linalg.LinAlgError as exc:
+                raise np.linalg.LinAlgError(
+                    "Jacobiano singular — sistema mal-condicionado ou ilhado."
+                ) from exc
 
-            # Atualiza theta e V
+            # Atualiza theta (barras nao-slack) e V (barras PQ).
             theta[1:] += delta_X[:self.n_barras - 1]
-            indices_pq = [i for i, barra in enumerate(self.barras) if barra.tipo == 1]
+            indices_pq = [i for i, b in enumerate(self.barras) if b.tipo == 1]
             delta_values = delta_X[self.n_barras - 1:]
             for idx, i in enumerate(indices_pq):
                 V[i] += delta_values[idx]
 
-        # Atualiza os valores de V e theta nas barras
+        # Atualiza os valores de V e theta nas barras.
         for i, barra in enumerate(self.barras):
             barra.V = V[i]
             barra.theta = theta[i]
-        
-        self.tempo = time.time() - start_time #calcula o tempo de solução do sistema.
+
+        self.tempo = time.time() - start_time
+
+        if not self.convergiu:
+            warnings.warn(
+                f"Fluxo de potencia nao convergiu em {self.max_iter} iteracoes "
+                f"(tolerancia {self.tolerancia})."
+            )
 
     def calcular_desvios(self, P_calc, Q_calc):
-        dP = np.array([barra.P - P_calc[i] for i, barra in enumerate(self.barras) if barra.tipo != 3])
-        dQ = np.array([barra.Q - Q_calc[i] for i, barra in enumerate(self.barras) if barra.tipo == 1])
+        dP = np.array([b.P - P_calc[i] for i, b in enumerate(self.barras)
+                       if b.tipo != 3])
+        dQ = np.array([b.Q - Q_calc[i] for i, b in enumerate(self.barras)
+                       if b.tipo == 1])
         return dP, dQ
 
     def calcular_jacobiano(self, V, theta, P_calc, Q_calc):
-        n_pq = len([b for b in self.barras if b.tipo == 1])
+        pq_indices = [i for i, b in enumerate(self.barras) if b.tipo == 1]
+        n_pq = len(pq_indices)
         H = np.zeros((self.n_barras - 1, self.n_barras - 1))
         N = np.zeros((self.n_barras - 1, n_pq))
         M = np.zeros((n_pq, self.n_barras - 1))
         L = np.zeros((n_pq, n_pq))
 
-        # Cálculo das partes da matriz Jacobiana
-        pq_indices = [i for i, b in enumerate(self.barras) if b.tipo == 1]
-        pv_pq_indices = [i for i, b in enumerate(self.barras) if b.tipo == 1 or b.tipo == 2]
-        
-        # Cálculo de H (Derivada de P em relação a theta)
-        for i in range(1, self.n_barras):  # Ignorando a barra slack (barra 1)
+        # Calculo de H (derivada de P em relacao a theta).
+        for i in range(1, self.n_barras):  # Ignora a barra slack (indice 0)
             for j in range(1, self.n_barras):
                 if i == j:
-                    H[i-1, j-1] = -Q_calc[i] - (V[i] ** 2) * self.Y[i, i].imag#diagonal principal
+                    H[i - 1, j - 1] = -Q_calc[i] - (V[i] ** 2) * self.Y[i, i].imag
                 else:
-                    H[i-1, j-1] = V[i] * V[j] * (self.Y[i, j].real * np.sin(self.theta(i) - self.theta(j)) - self.Y[i, j].imag * np.cos(self.theta(i) - self.theta(j)))#demais elementos
-        
-        # Cálculo de N (Derivada de P em relação a V)
+                    H[i - 1, j - 1] = V[i] * V[j] * (
+                        self.Y[i, j].real * np.sin(theta[i] - theta[j])
+                        - self.Y[i, j].imag * np.cos(theta[i] - theta[j]))
+
+        # Calculo de N (derivada de P em relacao a V).
         for i in range(1, self.n_barras):
             for idx, j in enumerate(pq_indices):
                 if i == j:
                     soma = 0
                     for k in range(self.n_barras):
                         if k != i:
-                            soma += V[k] * (self.Y[i, k].real * np.cos(self.theta(i) - self.theta(k)) + self.Y[i, k].imag * np.sin(self.theta(i) - self.theta(k)))
-                    N[i-1, idx] = 2 * V[i] * self.Y[i, i].real + soma
+                            soma += V[k] * (
+                                self.Y[i, k].real * np.cos(theta[i] - theta[k])
+                                + self.Y[i, k].imag * np.sin(theta[i] - theta[k]))
+                    N[i - 1, idx] = 2 * V[i] * self.Y[i, i].real + soma
                 else:
-                    N[i-1, idx] = V[i] * (self.Y[i, j].real * np.cos(self.theta(i) - self.theta(j)) + self.Y[i, j].imag * np.sin(self.theta(i) - self.theta(j)))
+                    N[i - 1, idx] = V[i] * (
+                        self.Y[i, j].real * np.cos(theta[i] - theta[j])
+                        + self.Y[i, j].imag * np.sin(theta[i] - theta[j]))
 
-        # Cálculo de M (Derivada de Q em relação a theta)
+        # Calculo de M (derivada de Q em relacao a theta).
         for idx_i, i in enumerate(pq_indices):
             for j in range(1, self.n_barras):
                 if i == j:
-                    M[idx_i, j-1] = P_calc[i] - (V[i] ** 2) * self.Y[i, i].real
+                    M[idx_i, j - 1] = P_calc[i] - (V[i] ** 2) * self.Y[i, i].real
                 else:
-                    M[idx_i, j-1] = -V[i] * V[j] * (self.Y[i, j].real * np.cos(self.theta(i) - self.theta(j)) + self.Y[i, j].imag * np.sin(self.theta(i) - self.theta(j)))
+                    M[idx_i, j - 1] = -V[i] * V[j] * (
+                        self.Y[i, j].real * np.cos(theta[i] - theta[j])
+                        + self.Y[i, j].imag * np.sin(theta[i] - theta[j]))
 
-        # Cálculo de L (Derivada de Q em relação a V)
+        # Calculo de L (derivada de Q em relacao a V).
         for idx_i, i in enumerate(pq_indices):
             for idx_j, j in enumerate(pq_indices):
                 if i == j:
                     soma = 0
                     for k in range(self.n_barras):
                         if k != i:
-                            soma += V[k] * (self.Y[i, k].real * np.sin(self.theta(i) - self.theta(k)) - self.Y[i, k].imag * np.cos(self.theta(i) - self.theta(k)))
+                            soma += V[k] * (
+                                self.Y[i, k].real * np.sin(theta[i] - theta[k])
+                                - self.Y[i, k].imag * np.cos(theta[i] - theta[k]))
                     L[idx_i, idx_j] = -2 * V[i] * self.Y[i, i].imag + soma
                 else:
-                    L[idx_i, idx_j] = V[i] * (self.Y[i, j].real * np.sin(self.theta(i) - self.theta(j)) - self.Y[i, j].imag * np.cos(self.theta(i) - self.theta(j)))
-                    
-        return np.block([[H, N], [M, L]])#monta a matriz jacobiana com as submatrizes das derivadas de P e Q em relação a v e theta
+                    L[idx_i, idx_j] = V[i] * (
+                        self.Y[i, j].real * np.sin(theta[i] - theta[j])
+                        - self.Y[i, j].imag * np.cos(theta[i] - theta[j]))
+
+        # Monta a Jacobiana a partir das submatrizes das derivadas de P e Q.
+        return np.block([[H, N], [M, L]])
 
     def fluxo_potencia(self, V, theta):
-        """Calcula a potência ativa e reativa nas barras."""
+        """Calcula a potencia ativa e reativa injetada em cada barra."""
         P_calc = np.zeros(self.n_barras)
         Q_calc = np.zeros(self.n_barras)
 
         for i in range(self.n_barras):
             for j in range(self.n_barras):
                 P_calc[i] += V[i] * V[j] * (
-                    self.Y[i, j].real * np.cos(theta[i] - theta[j]) +
-                    self.Y[i, j].imag * np.sin(theta[i] - theta[j])
-                )
+                    self.Y[i, j].real * np.cos(theta[i] - theta[j])
+                    + self.Y[i, j].imag * np.sin(theta[i] - theta[j]))
                 Q_calc[i] += V[i] * V[j] * (
-                    self.Y[i, j].real * np.sin(theta[i] - theta[j]) -
-                    self.Y[i, j].imag * np.cos(theta[i] - theta[j])
-                )
+                    self.Y[i, j].real * np.sin(theta[i] - theta[j])
+                    - self.Y[i, j].imag * np.cos(theta[i] - theta[j]))
         return P_calc, Q_calc
 
-    def transito(self, de, para):
-        """Calcula o trânsito de potência ativa e reativa entre duas barras."""
-        i = de - 1  # Índice da barra 'de'
-        j = para - 1  # Índice da barra 'para'
+    def transito(self, de: int, para: int):
+        """Calcula o transito de potencia ativa e reativa entre duas barras (1-based)."""
+        self._validar_indice_1based(de)
+        self._validar_indice_1based(para)
+        if de == para:
+            raise ValueError("as barras 'de' e 'para' devem ser diferentes")
+        i = de - 1
+        j = para - 1
 
-        # Tensão complexa nas barras
+        # Tensoes complexas nas barras.
         Vi = self.barras[i].V * (np.cos(self.barras[i].theta) + 1j * np.sin(self.barras[i].theta))
         Vj = self.barras[j].V * (np.cos(self.barras[j].theta) + 1j * np.sin(self.barras[j].theta))
 
-        # Corrente complexa de i para j
+        # Corrente complexa de i para j.
         I_ij = self.Y[i, j] * (Vi - Vj)
 
-        # Potência complexa de i para j
+        # Potencia complexa de i para j.
         S_ij = Vi * np.conj(I_ij)
-        P_ij = S_ij.real  # Potência ativa
-        Q_ij = S_ij.imag  # Potência reativa
+        P_ij = S_ij.real
+        Q_ij = S_ij.imag
 
         return {"S_ij": S_ij, "P_ij": P_ij, "Q_ij": Q_ij}
 
-
-    def losses(self, de, para):
-        """Calcula as perdas de potência ativa e reativa na linha entre duas barras."""
+    def losses(self, de: int, para: int):
+        """Calcula as perdas de potencia ativa e reativa na linha entre duas barras."""
         transito_ij = self.transito(de, para)
         transito_ji = self.transito(para, de)
 
-        # Perdas de potência ativa e reativa
-        S_loss = abs(transito_ij["S_ij"] + transito_ji["S_ij"])  # Potência complexa
-        P_loss = abs(transito_ij["P_ij"] + transito_ji["P_ij"])  # Potência ativa
-        Q_loss = abs(transito_ij["Q_ij"] + transito_ji["Q_ij"])  # Potência reativa
+        S_loss = abs(transito_ij["S_ij"] + transito_ji["S_ij"])
+        P_loss = abs(transito_ij["P_ij"] + transito_ji["P_ij"])
+        Q_loss = abs(transito_ij["Q_ij"] + transito_ji["Q_ij"])
 
         return {"S_loss": S_loss, "P_loss": P_loss, "Q_loss": Q_loss}
 
-    def totlosses(self):
-        """Calcula as perdas totais de potência ativa e reativa em todas as linhas do sistema."""
-        total_P_loss = 0.0  # Inicializa a soma das perdas de potência ativa
-        total_Q_loss = 0.0  # Inicializa a soma das perdas de potência reativa
-
-        # Itera sobre todas as combinações de barras conectadas
+    def _pares_conectados(self):
+        """Gera pares (i, j) com i < j conectados (|Y[i, j]| > TOL_CONEXAO)."""
         for i in range(self.n_barras):
-            for j in range(i + 1, self.n_barras):  # Considera apenas pares únicos (i, j)
-                if self.Y[i, j] != 0:  # Verifica se há uma conexão entre as barras
-                    perdas = self.losses(i + 1, j + 1)  # Calcula as perdas entre as barras
-                    total_P_loss += perdas["P_loss"]  # Soma as perdas de potência ativa
-                    total_Q_loss += perdas["Q_loss"]  # Soma as perdas de potência reativa
+            for j in range(i + 1, self.n_barras):
+                if abs(self.Y[i, j]) > TOL_CONEXAO:
+                    yield i, j
 
-        # retorna as perdas totais
-        return {"P_loss":total_P_loss,"Q_loss":total_Q_loss}
-    
+    def totlosses(self):
+        """Calcula as perdas totais de potencia ativa e reativa do sistema."""
+        total_P_loss = 0.0
+        total_Q_loss = 0.0
+        for i, j in self._pares_conectados():
+            perdas = self.losses(i + 1, j + 1)
+            total_P_loss += perdas["P_loss"]
+            total_Q_loss += perdas["Q_loss"]
+        return {"P_loss": total_P_loss, "Q_loss": total_Q_loss}
+
     def calcular_sensibilidade(self):
-        """Calcula as sensibilidades de potência ativa e reativa com base na matriz Jacobiana."""
-        if hasattr(self, 'ultimajacobiana'):
-            return np.linalg.inv(self.ultimajacobiana)  # Retorna a matriz de sensibilidade
-        else:
-            raise ValueError("A Jacobiana ainda não foi calculada.")    
+        """Retorna a matriz de sensibilidade (inversa da ultima Jacobiana)."""
+        if not hasattr(self, 'ultimajacobiana'):
+            raise ValueError(
+                "A Jacobiana ainda nao foi calculada. Rode calcular_fluxo() antes."
+            )
+        try:
+            return np.linalg.inv(self.ultimajacobiana)
+        except np.linalg.LinAlgError as exc:
+            raise np.linalg.LinAlgError(
+                "Jacobiano singular — sensibilidade indefinida."
+            ) from exc
 
-    def exportar(self, arquivo="sistema.json"):
-        """Exporta todas as informações do sistema para um arquivo JSON."""
+    def exportar(self, arquivo: str = "sistema.json") -> None:
+        """Exporta todas as informacoes do sistema para um arquivo JSON."""
         def serializar_valor(valor):
-            """Converte valores complexos em um formato serializável."""
-            if isinstance(valor, complex):
-                return {"real": valor.real, "imag": valor.imag}
-            if isinstance(valor, np.ndarray):  # Converte arrays para listas
+            """Converte valores complexos/numpy em um formato serializavel."""
+            if isinstance(valor, (complex, np.complexfloating)):
+                return {"real": float(valor.real), "imag": float(valor.imag)}
+            if isinstance(valor, np.ndarray):
                 return valor.tolist()
+            if isinstance(valor, np.integer):
+                return int(valor)
+            if isinstance(valor, np.floating):
+                return float(valor)
             return valor
+
+        fluxos = []
+        for i, j in self._pares_conectados():
+            fluxos.append({
+                "linha": f"{i + 1} -> {j + 1}",
+                **{c: serializar_valor(v) for c, v in self.transito(i + 1, j + 1).items()}
+            })
+            fluxos.append({
+                "linha": f"{j + 1} -> {i + 1}",
+                **{c: serializar_valor(v) for c, v in self.transito(j + 1, i + 1).items()}
+            })
 
         dados = {
             "barras": [
                 {
                     "indice": barra.indice + 1,
                     "tipo": barra.tipo,
-                    "tensao": barra.V,
-                    "angulo": barra.theta,
-                    "potencia_ativa": barra.P,
-                    "potencia_reativa": barra.Q
+                    "tensao": serializar_valor(barra.V),
+                    "angulo": serializar_valor(barra.theta),
+                    "potencia_ativa": serializar_valor(barra.P),
+                    "potencia_reativa": serializar_valor(barra.Q)
                 }
                 for barra in self.barras
             ],
-            "fluxos": [
-                {
-                    "linha": f"{i + 1} -> {j + 1}",
-                    **{chave: serializar_valor(valor) for chave, valor in self.transito(i + 1, j + 1).items()}
-                }
-                for i in range(self.n_barras)
-                for j in range(i + 1, self.n_barras)
-                if self.Y[i, j] != 0
-            ] + [
-                {
-                    "linha": f"{j + 1} -> {i + 1}",
-                    **{chave: serializar_valor(valor) for chave, valor in self.transito(j + 1, i + 1).items()}
-                }
-                for i in range(self.n_barras)
-                for j in range(i + 1, self.n_barras)
-                if self.Y[j, i] != 0
-            ],
+            "fluxos": fluxos,
             "perdas": self.totlosses(),
             "parametros": {
                 "tolerancia": self.tolerancia,
                 "max_iteracoes": self.max_iter,
                 "sbase": self.sbase,
+                "convergiu": self.convergiu,
                 "tempo_solucao": getattr(self, 'tempo', None)
             },
             "matriz_admitancia": [
-                [serializar_valor(self.Y[i, j]) for j in range(self.n_barras)] 
+                [serializar_valor(self.Y[i, j]) for j in range(self.n_barras)]
                 for i in range(self.n_barras)
             ]
         }
 
-        with open(arquivo, 'w') as f:
-            json.dump(dados, f, indent=4)
-        print(f"Informações exportadas para {arquivo}.")
+        try:
+            with open(arquivo, 'w') as f:
+                json.dump(dados, f, indent=4)
+        except OSError as exc:
+            raise OSError(f"Falha ao exportar para '{arquivo}': {exc}") from exc
+        print(f"Informacoes exportadas para {arquivo}.")
 
-    
-    def imprimir_estado(self,cd=4):
+    def imprimir_estado(self, cd: int = 4) -> None:
         print("Estado do Sistema:")
-        print("-" * 40)   
+        print("-" * 40)
         for barra in self.barras:
-            print(f"Barra {barra.indice + 1}: V = {barra.V:.{cd}f} pu, theta = {barra.theta:.{cd}f} rad")
+            print(f"Barra {barra.indice + 1}: V = {barra.V:.{cd}f} pu, "
+                  f"theta = {barra.theta:.{cd}f} rad")
         print("-" * 40)
 
-    def imprimir_transito(self,cd=4):
-        """Imprime o trânsito de potência ativa e reativa em todas as linhas do sistema."""
-        print("Trânsito de Potências:")
+    def imprimir_transito(self, cd: int = 4) -> None:
+        """Imprime o transito de potencia em todas as linhas do sistema."""
+        print("Transito de Potencias:")
         print("-" * 40)
-        for i in range(self.n_barras):
-            for j in range(i + 1, self.n_barras):  # Considera apenas pares únicos (i, j)
-                if self.Y[i, j] != 0:  # Verifica se há uma conexão entre as barras
-                    transito = self.transito(i + 1, j + 1)  # Calcula trânsito entre barras
-                    print(f"Linha {i + 1} -> {j + 1}: "
-                          f"P = {transito['P_ij']:.{cd}f} pu, Q = {transito['Q_ij']:.{cd}f} pu")
+        for i, j in self._pares_conectados():
+            transito = self.transito(i + 1, j + 1)
+            print(f"Linha {i + 1} -> {j + 1}: "
+                  f"P = {transito['P_ij']:.{cd}f} pu, Q = {transito['Q_ij']:.{cd}f} pu")
         print("-" * 40)
 
-    def imprimir_perdas(self,cd=4):
-        """Imprime as perdas de potência ativa e reativa em todas as linhas do sistema."""
-        print("Perdas de Potência nas Linhas:")
+    def imprimir_perdas(self, cd: int = 4) -> None:
+        """Imprime as perdas de potencia em todas as linhas do sistema."""
+        print("Perdas de Potencia nas Linhas:")
         print("-" * 40)
-        for i in range(self.n_barras):
-            for j in range(i + 1, self.n_barras):  # Considera apenas pares únicos (i, j)
-                if self.Y[i, j] != 0:  # Verifica se há uma conexão entre as barras
-                    perdas = self.losses(i + 1, j + 1)  # Calcula as perdas entre as barras
-                    print(f"Linha {i + 1} -> {j + 1}: "
-                          f"P_loss = {perdas['P_loss']:.{cd}f} pu, "
-                          f"Q_loss = {perdas['Q_loss']:.{cd}f} pu")
+        for i, j in self._pares_conectados():
+            perdas = self.losses(i + 1, j + 1)
+            print(f"Linha {i + 1} -> {j + 1}: "
+                  f"P_loss = {perdas['P_loss']:.{cd}f} pu, "
+                  f"Q_loss = {perdas['Q_loss']:.{cd}f} pu")
         print("-" * 40)

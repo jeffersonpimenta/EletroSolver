@@ -121,13 +121,23 @@ for i in range(n_barras):
 git clone https://github.com/jeffersonpimenta/EletroSolver.git
 
 # Instala dependências
-pip install numpy
+pip install -r requirements.txt
 ```
 
 ## Dependências
 - NumPy
 - Python 3.7+
 
+## Testes
+
+```bash
+pip install -r requirements-dev.txt
+pytest
+```
+
+A suíte cobre o Jacobiano (analítico vs. diferenças finitas), invariantes físicos
+(mismatch nulo e balanço de potência), validação de entrada e detecção de
+(não-)convergência.
 ## Licença
 GNU GENERAL PUBLIC LICENSE
 
