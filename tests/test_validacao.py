@@ -25,12 +25,14 @@ def test_barra_tensao_nao_positiva():
 
 # --- SistemaPotencia.__init__ ---
 
-def test_slack_fora_do_indice_zero():
+def test_slack_em_indice_arbitrario():
+    # A slack pode estar em qualquer posicao: construir nao deve lancar erro
+    # (a correcao fisica e verificada em test_slack_arbitraria.py).
     barras = barras_5()
     barras[0].tipo = 1  # tira a slack da posicao 0
-    barras[1].tipo = 3  # coloca em outra posicao
-    with pytest.raises(ValueError):
-        SistemaPotencia(barras, Y_5())
+    barras[2].tipo = 3  # coloca a slack no indice 2
+    sistema = SistemaPotencia(barras, Y_5())
+    assert sistema.slack_idx == 2
 
 
 def test_sem_slack():

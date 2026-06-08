@@ -35,10 +35,10 @@ class Barra:
 class SistemaPotencia:
     """Resolve o fluxo de potencia por Newton-Raphson.
 
-    Requisito de ordenacao: a barra slack (tipo 3) deve ser a barra de indice 0
-    (a primeira da lista). O construtor valida isso. Generalizar a slack para uma
-    posicao arbitraria exigiria reindexar as submatrizes do Jacobiano e e trabalho
-    futuro.
+    A barra slack (tipo 3) pode ocupar qualquer posicao da lista de barras; o
+    construtor exige exatamente uma barra tipo 3 e guarda sua posicao em
+    self.slack_idx. O Jacobiano e a atualizacao de estado usam listas explicitas
+    de indices nao-slack e PQ (em vez de assumir a slack no indice 0).
 
     Apos calcular_fluxo():
       - self.convergiu  -> bool indicando se o metodo convergiu.
@@ -63,12 +63,9 @@ class SistemaPotencia:
                 f"sistema deve ter exatamente uma barra slack (tipo 3); "
                 f"encontradas {len(slacks)}"
             )
-        if slacks[0] != 0:
-            raise ValueError(
-                "a barra slack (tipo 3) deve ser a barra de indice 0 (primeira da lista)"
-            )
 
         self.barras = barras  # Lista de objetos Barra
+        self.slack_idx = slacks[0]  # Indice (0-based) da barra slack, em qualquer posicao
         self.Y = Y            # Matriz de admitancias
         self.n_barras = n
         self.tolerancia = tolerancia
@@ -148,11 +145,16 @@ class SistemaPotencia:
                 ) from exc
 
             # Atualiza theta (barras nao-slack) e V (barras PQ).
-            theta[1:] += delta_X[:self.n_barras - 1]
+            # A slack mantem theta fixo (indice fora de nao_slack); os PV mantem
+            # V fixo (indice fora de indices_pq).
+            nao_slack = [i for i, b in enumerate(self.barras) if b.tipo != 3]
             indices_pq = [i for i, b in enumerate(self.barras) if b.tipo == 1]
-            delta_values = delta_X[self.n_barras - 1:]
+            delta_theta = delta_X[:len(nao_slack)]
+            delta_V = delta_X[len(nao_slack):]
+            for idx, i in enumerate(nao_slack):
+                theta[i] += delta_theta[idx]
             for idx, i in enumerate(indices_pq):
-                V[i] += delta_values[idx]
+                V[i] += delta_V[idx]
 
         # Atualiza os valores de V e theta nas barras.
         for i, barra in enumerate(self.barras):
@@ -175,26 +177,31 @@ class SistemaPotencia:
         return dP, dQ
 
     def calcular_jacobiano(self, V, theta, P_calc, Q_calc):
+        # Indices das barras nao-slack e PQ, em ordem crescente (mesma ordenacao
+        # usada por calcular_desvios para montar dX). A slack pode estar em
+        # qualquer posicao: nao_slack simplesmente nao a inclui.
+        nao_slack = [i for i, b in enumerate(self.barras) if b.tipo != 3]
         pq_indices = [i for i, b in enumerate(self.barras) if b.tipo == 1]
+        n_ns = len(nao_slack)
         n_pq = len(pq_indices)
-        H = np.zeros((self.n_barras - 1, self.n_barras - 1))
-        N = np.zeros((self.n_barras - 1, n_pq))
-        M = np.zeros((n_pq, self.n_barras - 1))
+        H = np.zeros((n_ns, n_ns))
+        N = np.zeros((n_ns, n_pq))
+        M = np.zeros((n_pq, n_ns))
         L = np.zeros((n_pq, n_pq))
 
         # Calculo de H (derivada de P em relacao a theta).
-        for i in range(1, self.n_barras):  # Ignora a barra slack (indice 0)
-            for j in range(1, self.n_barras):
+        for idx_i, i in enumerate(nao_slack):
+            for idx_j, j in enumerate(nao_slack):
                 if i == j:
-                    H[i - 1, j - 1] = -Q_calc[i] - (V[i] ** 2) * self.Y[i, i].imag
+                    H[idx_i, idx_j] = -Q_calc[i] - (V[i] ** 2) * self.Y[i, i].imag
                 else:
-                    H[i - 1, j - 1] = V[i] * V[j] * (
+                    H[idx_i, idx_j] = V[i] * V[j] * (
                         self.Y[i, j].real * np.sin(theta[i] - theta[j])
                         - self.Y[i, j].imag * np.cos(theta[i] - theta[j]))
 
         # Calculo de N (derivada de P em relacao a V).
-        for i in range(1, self.n_barras):
-            for idx, j in enumerate(pq_indices):
+        for idx_i, i in enumerate(nao_slack):
+            for idx_j, j in enumerate(pq_indices):
                 if i == j:
                     soma = 0
                     for k in range(self.n_barras):
@@ -202,19 +209,19 @@ class SistemaPotencia:
                             soma += V[k] * (
                                 self.Y[i, k].real * np.cos(theta[i] - theta[k])
                                 + self.Y[i, k].imag * np.sin(theta[i] - theta[k]))
-                    N[i - 1, idx] = 2 * V[i] * self.Y[i, i].real + soma
+                    N[idx_i, idx_j] = 2 * V[i] * self.Y[i, i].real + soma
                 else:
-                    N[i - 1, idx] = V[i] * (
+                    N[idx_i, idx_j] = V[i] * (
                         self.Y[i, j].real * np.cos(theta[i] - theta[j])
                         + self.Y[i, j].imag * np.sin(theta[i] - theta[j]))
 
         # Calculo de M (derivada de Q em relacao a theta).
         for idx_i, i in enumerate(pq_indices):
-            for j in range(1, self.n_barras):
+            for idx_j, j in enumerate(nao_slack):
                 if i == j:
-                    M[idx_i, j - 1] = P_calc[i] - (V[i] ** 2) * self.Y[i, i].real
+                    M[idx_i, idx_j] = P_calc[i] - (V[i] ** 2) * self.Y[i, i].real
                 else:
-                    M[idx_i, j - 1] = -V[i] * V[j] * (
+                    M[idx_i, idx_j] = -V[i] * V[j] * (
                         self.Y[i, j].real * np.cos(theta[i] - theta[j])
                         + self.Y[i, j].imag * np.sin(theta[i] - theta[j]))
 
