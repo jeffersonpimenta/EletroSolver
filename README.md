@@ -18,8 +18,15 @@ EletroSolver é uma biblioteca Python para análise de sistemas de energia, ofer
 - Cálculos abrangentes da matriz Jacobiana
 
 ### Capacidades de Análise de Rede
-- Cálculo de trânsito de potência entre barras
-- Estimativa de perdas de potência
+- Cálculo de trânsito de potência entre barras (convenção: `S_ij` é a potência
+  que sai da barra `de` em direção a `para`, medida na extremidade `de`)
+- Trânsito exato com taps de transformador e carregamento shunt de linha,
+  passando os dados de ramo via `linhas=` (dataclass `Linha`); sem eles, o
+  cálculo via Ybus é exato para ramos série puros
+- Estimativa de perdas de potência com sinal: `Q_loss` negativo indica linha
+  gerando reativo (carregamento capacitivo)
+- Após `calcular_fluxo()`, P e Q da slack e Q das barras PV são atualizados
+  com os valores resolvidos (refletidos também em `exportar()`)
 - Determinação de tensão e ângulo de fase
 - Relatórios sobre o estado do sistema
 
@@ -54,6 +61,11 @@ EletroSolver é uma biblioteca Python para análise de sistemas de energia, ofer
   - Computação de trânsito e perdas
   - Visualização do estado do sistema
 
+### Dataclass `Linha`
+- Dados de ramo para trânsito/perdas exatos: `de`, `para`, `z` (impedância
+  série), `b` (susceptância shunt total, modelo pi) e `tap` (lado `de`)
+- Passada ao construtor via `SistemaPotencia(barras, Y, linhas=[...])`
+
 ### Módulo `Faltas` (curto-circuito)
 - `Gerador`, `Ramo`, `Carga`: dados de sequência das fontes, linhas/trafos e cargas
 - `EstudoCurtoCircuito`: monta as redes de sequência (Z1, Z2, Z0) e calcula faltas
@@ -67,7 +79,7 @@ EletroSolver é uma biblioteca Python para análise de sistemas de energia, ofer
 
 ### Análise Simples de Sistema de Potência
 ```python
-from EletroSolver import Barra, SistemaPotencia
+from EletroSolver import Barra, Linha, SistemaPotencia
 import numpy as np
 
 # Define configurações de barras
@@ -79,20 +91,30 @@ barras = [
     Barra(4, 1, 1.0, 0.0, 1.0, 0.4)
 ]
 
-# Define matriz Y e admitâncias
-Y = np.zeros((len(barras), len(barras)), dtype=complex)
-Y[0, 1] = Y[1, 0] = -1 / (0.05 + 0.2j)
-Y[0, 3] = Y[3, 0] = -1 / (0.05 + 0.25j)
-Y[1, 2] = Y[2, 1] = -1 / (0.05 + 0.15j)
-Y[1, 4] = Y[4, 1] = -1 / (0.1 + 0.3j)
-Y[2, 3] = Y[3, 2] = -1 / (0.05 + 0.2j)
-Y[3, 4] = Y[4, 3] = -1 / (0.05 + 0.1j)
+# Define os ramos da rede (b = carregamento shunt total; tap p/ trafos)
+linhas = [
+    Linha(1, 2, z=0.05 + 0.2j),
+    Linha(1, 4, z=0.05 + 0.25j),
+    Linha(2, 3, z=0.05 + 0.15j),
+    Linha(2, 5, z=0.1 + 0.3j),
+    Linha(3, 4, z=0.05 + 0.2j),
+    Linha(4, 5, z=0.05 + 0.1j),
+]
 
-for i in range(len(barras)):
-    Y[i, i] = -np.sum(Y[i, :])
+# Monta a matriz Y a partir dos ramos
+Y = np.zeros((len(barras), len(barras)), dtype=complex)
+for lin in linhas:
+    i, j = lin.de - 1, lin.para - 1
+    ys = 1 / lin.z
+    Y[i, i] += ys
+    Y[j, j] += ys
+    Y[i, j] -= ys
+    Y[j, i] -= ys
 
 # Cria e analisa sistema de potência
-sistema = SistemaPotencia(barras, Y)
+# (linhas= é opcional: habilita trânsito/perdas exatos por ramo,
+#  inclusive com tap e carregamento; sem ele, usa-se a Ybus)
+sistema = SistemaPotencia(barras, Y, linhas=linhas)
 sistema.calcular_fluxo()
 
 # Acessa resultados

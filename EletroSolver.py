@@ -1,12 +1,28 @@
 import json
 import time
 import warnings
+from dataclasses import dataclass
 
 import numpy as np
 
 # Modulo minimo de Y[i, j] para considerar duas barras conectadas.
 # Evita comparacoes de igualdade exata com complexos (sujeitas a erro de ponto flutuante).
 TOL_CONEXAO = 1e-12
+
+
+@dataclass
+class Linha:
+    """Ramo (linha ou transformador) para o calculo exato de transito/perdas.
+
+    Modelo pi com tap (convencao MATPOWER, defasagem nula): a susceptancia b e
+    o carregamento shunt TOTAL da linha (metade em cada extremidade); o tap
+    refere a extremidade 'de'.
+    """
+    de: int          # 1-based
+    para: int        # 1-based
+    z: complex       # impedancia serie (pu)
+    b: float = 0.0   # susceptancia shunt total da linha (modelo pi)
+    tap: float = 1.0
 
 
 class Barra:
@@ -46,7 +62,7 @@ class SistemaPotencia:
     """
 
     def __init__(self, barras, Y, tolerancia: float = 1e-6,
-                 max_iter: int = 100, Sbase: float = 100) -> None:
+                 max_iter: int = 100, Sbase: float = 100, linhas=None) -> None:
         n = len(barras)
         Y = np.asarray(Y)
         if Y.shape != (n, n):
@@ -63,10 +79,30 @@ class SistemaPotencia:
                 f"sistema deve ter exatamente uma barra slack (tipo 3); "
                 f"encontradas {len(slacks)}"
             )
+        if linhas is not None:
+            linhas = list(linhas)
+            for lin in linhas:
+                if not (1 <= lin.de <= n) or not (1 <= lin.para <= n):
+                    raise ValueError(
+                        f"linha {lin.de}-{lin.para}: indice fora da faixa [1, {n}]"
+                    )
+                if lin.de == lin.para:
+                    raise ValueError(
+                        f"linha invalida: 'de' == 'para' == {lin.de}"
+                    )
+                if lin.z == 0:
+                    raise ValueError(
+                        f"linha {lin.de}-{lin.para}: impedancia serie z nao pode ser 0"
+                    )
+                if lin.tap == 0:
+                    raise ValueError(
+                        f"linha {lin.de}-{lin.para}: tap nao pode ser 0"
+                    )
 
         self.barras = barras  # Lista de objetos Barra
         self.slack_idx = slacks[0]  # Indice (0-based) da barra slack, em qualquer posicao
         self.Y = Y            # Matriz de admitancias
+        self.linhas = linhas  # Dados de ramo (None => transito aproximado via Ybus)
         self.n_barras = n
         self.tolerancia = tolerancia
         self.max_iter = max_iter
@@ -104,7 +140,17 @@ class SistemaPotencia:
         if tipo is not None:
             if tipo not in (1, 2, 3):
                 raise ValueError(f"tipo de barra invalido: {tipo!r}")
+            # Preserva o invariante validado no construtor: exatamente 1 slack.
+            tipos = [b.tipo for b in self.barras]
+            tipos[indice - 1] = tipo
+            n_slacks = tipos.count(3)
+            if n_slacks != 1:
+                raise ValueError(
+                    f"alteracao deixaria o sistema com {n_slacks} barras slack "
+                    f"(tipo 3); deve haver exatamente 1"
+                )
             barra.tipo = tipo
+            self.slack_idx = tipos.index(3)
         if V is not None:
             if V <= 0:
                 raise ValueError(f"tensao V deve ser > 0 (recebido {V!r})")
@@ -160,6 +206,17 @@ class SistemaPotencia:
         for i, barra in enumerate(self.barras):
             barra.V = V[i]
             barra.theta = theta[i]
+
+        # Grava as injecoes resolvidas onde elas eram incognitas: P e Q da
+        # slack e Q das barras PV. Os alvos das PQ nao sao tocados, entao
+        # re-resolver o sistema continua dando o mesmo resultado.
+        if self.convergiu:
+            for i, barra in enumerate(self.barras):
+                if barra.tipo == 3:
+                    barra.P = float(P_calc[i])
+                    barra.Q = float(Q_calc[i])
+                elif barra.tipo == 2:
+                    barra.Q = float(Q_calc[i])
 
         self.tempo = time.time() - start_time
 
@@ -260,7 +317,16 @@ class SistemaPotencia:
         return P_calc, Q_calc
 
     def transito(self, de: int, para: int):
-        """Calcula o transito de potencia ativa e reativa entre duas barras (1-based)."""
+        """Calcula o transito de potencia entre duas barras (1-based).
+
+        Convencao: S_ij e a potencia que SAI da barra `de` em direcao a `para`,
+        medida na extremidade `de` (positiva no sentido de -> para).
+
+        Com `linhas` fornecidas no construtor, usa o modelo pi com tap
+        (MATPOWER) e soma os ramos paralelos entre o par — exato inclusive com
+        tap e carregamento shunt. Sem `linhas`, usa -Y[de, para] * (Vi - Vj),
+        exato apenas para ramo serie puro (sem tap nem carregamento).
+        """
         self._validar_indice_1based(de)
         self._validar_indice_1based(para)
         if de == para:
@@ -272,8 +338,29 @@ class SistemaPotencia:
         Vi = self.barras[i].V * (np.cos(self.barras[i].theta) + 1j * np.sin(self.barras[i].theta))
         Vj = self.barras[j].V * (np.cos(self.barras[j].theta) + 1j * np.sin(self.barras[j].theta))
 
-        # Corrente complexa de i para j.
-        I_ij = self.Y[i, j] * (Vi - Vj)
+        if self.linhas is not None:
+            # Corrente total saindo de `de`, somando ramos paralelos.
+            I_ij = 0.0 + 0.0j
+            achou = False
+            for lin in self.linhas:
+                ys = 1.0 / lin.z
+                bc = 1j * lin.b / 2.0
+                tap = lin.tap
+                if lin.de == de and lin.para == para:
+                    # Lado 'de' do ramo (referido pelo tap).
+                    I_ij += (ys + bc) / (tap * tap) * Vi - (ys / tap) * Vj
+                    achou = True
+                elif lin.de == para and lin.para == de:
+                    # Lado 'para' do ramo.
+                    I_ij += (ys + bc) * Vi - (ys / tap) * Vj
+                    achou = True
+            if not achou:
+                raise ValueError(
+                    f"nao ha linha entre as barras {de} e {para}"
+                )
+        else:
+            # Y[i, j] = -y_serie (convencao Ybus): corrente de i para j.
+            I_ij = -self.Y[i, j] * (Vi - Vj)
 
         # Potencia complexa de i para j.
         S_ij = Vi * np.conj(I_ij)
@@ -283,18 +370,35 @@ class SistemaPotencia:
         return {"S_ij": S_ij, "P_ij": P_ij, "Q_ij": Q_ij}
 
     def losses(self, de: int, para: int):
-        """Calcula as perdas de potencia ativa e reativa na linha entre duas barras."""
+        """Calcula as perdas de potencia na linha entre duas barras.
+
+        P_loss e Q_loss sao somas com sinal das duas extremidades: P_loss >= 0
+        em rede passiva; Q_loss negativo indica que a linha gera reativo
+        (carregamento capacitivo). S_loss e o modulo da perda complexa.
+        """
         transito_ij = self.transito(de, para)
         transito_ji = self.transito(para, de)
 
         S_loss = abs(transito_ij["S_ij"] + transito_ji["S_ij"])
-        P_loss = abs(transito_ij["P_ij"] + transito_ji["P_ij"])
-        Q_loss = abs(transito_ij["Q_ij"] + transito_ji["Q_ij"])
+        P_loss = transito_ij["P_ij"] + transito_ji["P_ij"]
+        Q_loss = transito_ij["Q_ij"] + transito_ji["Q_ij"]
 
         return {"S_loss": S_loss, "P_loss": P_loss, "Q_loss": Q_loss}
 
     def _pares_conectados(self):
-        """Gera pares (i, j) com i < j conectados (|Y[i, j]| > TOL_CONEXAO)."""
+        """Gera pares (i, j) 0-based com i < j conectados.
+
+        Com `linhas`, os pares vem da lista de ramos (paralelos deduplicados);
+        sem, da varredura da Ybus (|Y[i, j]| > TOL_CONEXAO).
+        """
+        if self.linhas is not None:
+            vistos = set()
+            for lin in self.linhas:
+                par = (min(lin.de, lin.para) - 1, max(lin.de, lin.para) - 1)
+                if par not in vistos:
+                    vistos.add(par)
+                    yield par
+            return
         for i in range(self.n_barras):
             for j in range(i + 1, self.n_barras):
                 if abs(self.Y[i, j]) > TOL_CONEXAO:

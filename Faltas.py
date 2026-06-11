@@ -331,7 +331,6 @@ class EstudoCurtoCircuito:
             "Vf": Vpre[k],
             "I_seq": (I0, I1, I2),
             "I_fase": self._para_fase(I0, I1, I2),
-            "I_falta": self._para_fase(I0, I1, I2),
             "V_seq": (V0, V1, V2),
             "V_fase": Vfase,
             "contrib_linha": self._contrib_ramos(dV0, dV1, dV2),
